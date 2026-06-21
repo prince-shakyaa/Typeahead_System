@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Typeahead Search | HLD Assignment</title>
+  <meta name="description" content="Highly scalable typeahead search backend demo with consistent hashing, recency-aware trending, and batch writes." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0a0e1a;
+      --surface:   #111827;
+      --surface2:  #1a2235;
+      --border:    #1e293b;
+      --accent:    #6366f1;
+      --accent2:   #8b5cf6;
+      --green:     #10b981;
+      --yellow:    #f59e0b;
+      --red:       #ef4444;
+      --text:      #f1f5f9;
+      --muted:     #64748b;
+      --subtle:    #94a3b8;
+      --radius:    14px;
+      --shadow:    0 8px 32px rgba(0,0,0,0.4);
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Background gradient orbs ── */
+    body::before, body::after {
+      content: '';
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(120px);
+      opacity: 0.15;
+      pointer-events: none;
+      z-index: 0;
+    }
+    body::before {
+      width: 600px; height: 600px;
+      background: var(--accent);
+      top: -200px; left: -100px;
+    }
+    body::after {
+      width: 500px; height: 500px;
+      background: var(--accent2);
+      bottom: -100px; right: -100px;
+    }
+
+    /* ── Layout ── */
+    .app { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
+
+    header { text-align: center; margin-bottom: 40px; }
+    header h1 {
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 8px;
+    }
+    header p { color: var(--muted); font-size: 0.95rem; }
+    .badge {
+      display: inline-block; background: rgba(99,102,241,0.15);
+      border: 1px solid rgba(99,102,241,0.3);
+      color: var(--accent); font-size: 0.72rem; font-weight: 600;
+      padding: 2px 10px; border-radius: 20px; margin: 4px 3px;
+      letter-spacing: 0.04em; text-transform: uppercase;
+    }
+
+    /* ── Search area ── */
+    .search-wrap { max-width: 700px; margin: 0 auto 40px; position: relative; }
+
+    .search-box {
+      position: relative;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      transition: border-color 0.2s;
+    }
+    .search-box:focus-within { border-color: var(--accent); }
+
+    .search-icon {
+      position: absolute; left: 18px; top: 50%; transform: translateY(-50%);
+      color: var(--muted); pointer-events: none; font-size: 1.1rem;
+    }
+
+    #search-input {
+      width: 100%; padding: 18px 120px 18px 52px;
+      background: transparent; border: none; outline: none;
+      font-size: 1.05rem; color: var(--text); font-family: 'Inter', sans-serif;
+    }
+    #search-input::placeholder { color: var(--muted); }
+
+    .mode-toggle {
+      position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+      display: flex; gap: 4px;
+    }
+    .mode-btn {
+      padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: transparent; color: var(--muted); font-size: 0.75rem;
+      font-weight: 500; cursor: pointer; transition: all 0.15s;
+    }
+    .mode-btn.active {
+      background: var(--accent); border-color: var(--accent); color: white;
+    }
+
+    /* ── Dropdown ── */
+    .dropdown {
+      position: absolute; top: calc(100% + 8px); left: 0; right: 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      z-index: 100;
+      display: none;
+      animation: fadeDown 0.15s ease;
+    }
+    .dropdown.show { display: block; }
+
+    @keyframes fadeDown {
+      from { opacity: 0; transform: translateY(-6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .dropdown-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 13px 18px; cursor: pointer;
+      transition: background 0.1s; border-bottom: 1px solid var(--border);
+    }
+    .dropdown-item:last-child { border-bottom: none; }
+    .dropdown-item:hover, .dropdown-item.selected { background: var(--surface2); }
+    .dropdown-item.selected { border-left: 3px solid var(--accent); padding-left: 15px; }
+
+    .item-icon { color: var(--muted); font-size: 0.9rem; flex-shrink: 0; }
+    .item-text { flex: 1; font-size: 0.95rem; }
+    .item-text mark {
+      background: transparent; color: var(--accent); font-weight: 600;
+    }
+    .item-rank {
+      font-size: 0.7rem; color: var(--muted);
+      background: var(--surface2); padding: 2px 7px; border-radius: 6px;
+    }
+
+    .dropdown-empty {
+      padding: 20px; text-align: center; color: var(--muted); font-size: 0.9rem;
+    }
+    .dropdown-loading {
+      padding: 16px; display: flex; align-items: center; justify-content: center; gap: 8px;
+      color: var(--muted); font-size: 0.9rem;
+    }
+
+    /* ── Spinner ── */
+    .spinner {
+      width: 16px; height: 16px; border: 2px solid var(--border);
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Search result toast ── */
+    .toast {
+      position: fixed; bottom: 24px; right: 24px;
+      background: var(--surface); border: 1px solid var(--green);
+      color: var(--green); padding: 12px 20px; border-radius: var(--radius);
+      font-size: 0.9rem; font-weight: 500;
+      box-shadow: var(--shadow); z-index: 999;
+      transform: translateY(80px); opacity: 0;
+      transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .toast.show { transform: translateY(0); opacity: 1; }
+
+    /* ── Grid ── */
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+    }
+    .card-title {
+      font-size: 0.8rem; font-weight: 600; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 16px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .card-title .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+    }
+    .dot-green { background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .dot-yellow { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
+    .dot-blue { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+    .dot-purple { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
+
+    /* ── Trending list ── */
+    .trend-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+      cursor: pointer; transition: color 0.15s;
+    }
+    .trend-item:last-child { border-bottom: none; }
+    .trend-item:hover { color: var(--accent); }
+    .trend-rank {
+      width: 22px; height: 22px; border-radius: 6px;
+      background: var(--surface2); display: flex; align-items: center; justify-content: center;
+      font-size: 0.7rem; font-weight: 700; color: var(--muted); flex-shrink: 0;
+    }
+    .trend-rank.top { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: white; }
+    .trend-text { flex: 1; font-size: 0.88rem; }
+    .trend-score {
+      font-size: 0.72rem; color: var(--muted);
+      background: var(--surface2); padding: 2px 7px; border-radius: 6px;
+    }
+    .trend-empty { color: var(--muted); font-size: 0.88rem; text-align: center; padding: 20px 0; }
+
+    /* ── Cache debug ── */
+    .debug-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.85rem;
+    }
+    .debug-row:last-child { border-bottom: none; }
+    .debug-key { color: var(--muted); }
+    .debug-val { font-weight: 500; font-family: monospace; font-size: 0.8rem; }
+    .hit { color: var(--green); }
+    .miss { color: var(--yellow); }
+
+    /* ── Stats ── */
+    .stat-row {
+      display: flex; justify-content: space-between;
+      padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.85rem;
+    }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { color: var(--muted); }
+    .stat-val { font-weight: 600; }
+    .stat-val.accent { color: var(--accent); }
+    .stat-val.green { color: var(--green); }
+
+    /* ── Health strip ── */
+    .health-strip {
+      display: flex; gap: 12px; flex-wrap: wrap;
+      margin-bottom: 32px; justify-content: center;
+    }
+    .health-pill {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--surface); border: 1px solid var(--border);
+      padding: 8px 16px; border-radius: 30px; font-size: 0.8rem;
+    }
+    .health-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .health-dot.ok { background: var(--green); animation: pulse 2s infinite; }
+    .health-dot.bad { background: var(--red); }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0.4); }
+      50% { box-shadow: 0 0 0 6px rgba(16,185,129,0); }
+    }
+
+    /* ── Ring viz ── */
+    .ring-vis { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .node-pill {
+      flex: 1; min-width: 120px; text-align: center;
+      background: var(--surface2); border: 1px solid var(--border);
+      padding: 10px 12px; border-radius: 10px; font-size: 0.78rem;
+    }
+    .node-pill.active { border-color: var(--accent); background: rgba(99,102,241,0.1); }
+    .node-name { font-weight: 600; margin-bottom: 4px; }
+    .node-vnodes { color: var(--muted); }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center; margin-top: 48px; color: var(--muted); font-size: 0.8rem;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <header>
+    <h1>⚡ Typeahead Search System</h1>
+    <p>HLD Assignment — Advanced Systems Design</p>
+    <div style="margin-top:12px">
+      <span class="badge">In-Memory Trie</span>
+      <span class="badge">Redis Cache</span>
+      <span class="badge">Consistent Hashing</span>
+      <span class="badge">Recency Ranking</span>
+      <span class="badge">Batch Writes</span>
+    </div>
+  </header>
+
+  <!-- Health strip -->
+  <div class="health-strip" id="health-strip">
+    <div class="health-pill"><div class="health-dot" id="hd-api"></div><span id="ht-api">API …</span></div>
+    <div class="health-pill"><div class="health-dot" id="hd-redis"></div><span id="ht-redis">Redis …</span></div>
+    <div class="health-pill"><div class="health-dot" id="hd-trie"></div><span id="ht-trie">Trie …</span></div>
+    <div class="health-pill"><div class="health-dot" id="hd-hash"></div><span id="ht-hash">Hash Ring …</span></div>
+  </div>
+
+  <!-- Search -->
+  <div class="search-wrap">
+    <div class="search-box">
+      <span class="search-icon">🔍</span>
+      <input
+        id="search-input"
+        type="text"
+        placeholder="Start typing to search… (try 'python', 'docker', 'redis')"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <div class="mode-toggle">
+        <button class="mode-btn" id="btn-classic" onclick="setMode('classic')">Classic</button>
+        <button class="mode-btn active" id="btn-trending" onclick="setMode('trending')">Trending</button>
+      </div>
+    </div>
+    <div class="dropdown" id="dropdown"></div>
+  </div>
+
+  <!-- Main grid -->
+  <div class="grid">
+
+    <!-- Trending -->
+    <div class="card">
+      <div class="card-title"><div class="dot dot-yellow"></div>Trending Searches</div>
+      <div id="trending-list"><div class="trend-empty">Loading…</div></div>
+    </div>
+
+    <!-- Cache Debug -->
+    <div class="card">
+      <div class="card-title"><div class="dot dot-blue"></div>Cache Debug <span style="font-weight:400;margin-left:4px;text-transform:none;font-size:0.75rem">(last prefix)</span></div>
+      <div id="cache-debug">
+        <div class="debug-row"><span class="debug-key">Prefix</span><span class="debug-val">—</span></div>
+        <div class="debug-row"><span class="debug-key">Cache Node</span><span class="debug-val">—</span></div>
+        <div class="debug-row"><span class="debug-key">Redis Key</span><span class="debug-val">—</span></div>
+        <div class="debug-row"><span class="debug-key">Status</span><span class="debug-val">—</span></div>
+      </div>
+    </div>
+
+    <!-- Batch Write Stats -->
+    <div class="card">
+      <div class="card-title"><div class="dot dot-purple"></div>Batch Write Stats</div>
+      <div id="batch-stats">
+        <div class="stat-row"><span class="stat-label">Loading…</span></div>
+      </div>
+    </div>
+
+    <!-- Hash Ring -->
+    <div class="card">
+      <div class="card-title"><div class="dot dot-green"></div>Consistent Hash Ring</div>
+      <div class="ring-vis" id="ring-vis">
+        <div class="node-pill">Loading…</div>
+      </div>
+      <div style="margin-top:12px;font-size:0.78rem;color:var(--muted)">
+        Active node for current prefix: <span id="active-node" style="color:var(--accent);font-weight:600">—</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Toast notification -->
+<div class="toast" id="toast"></div>
+
+<footer>
+  <p>
+    <a href="/docs" target="_blank">Swagger UI</a> ·
+    <a href="/health" target="_blank">/health</a> ·
+    <a href="/stats" target="_blank">/stats</a> ·
+    <a href="/trending" target="_blank">/trending</a>
+  </p>
+</footer>
+
+<script>
+  const API = '';
+  let mode = 'trending';
+  let debounceTimer = null;
+  let selectedIdx = -1;
+  let currentSuggestions = [];
+  let lastPrefix = '';
+
+  // ── Mode toggle ──
+  function setMode(m) {
+    mode = m;
+    document.getElementById('btn-classic').classList.toggle('active', m === 'classic');
+    document.getElementById('btn-trending').classList.toggle('active', m === 'trending');
+    const q = document.getElementById('search-input').value.trim();
+    if (q) fetchSuggestions(q);
+  }
+
+  // ── Health check ──
+  async function checkHealth() {
+    try {
+      const r = await fetch(`${API}/health`);
+      const d = await r.json();
+      const ok = d.status === 'healthy';
+      setDot('hd-api', true); setText('ht-api', `API  ✓  ${d.uptime_seconds}s`);
+      setDot('hd-redis', d.dependencies?.redis === 'connected');
+      setText('ht-redis', `Redis ${d.dependencies?.redis === 'connected' ? '✓' : '✗'}`);
+      setDot('hd-trie', true); setText('ht-trie', 'Trie ✓');
+      setDot('hd-hash', true); setText('ht-hash', d.dependencies?.consistent_hash_ring || 'Hash Ring');
+    } catch {
+      setDot('hd-api', false); setText('ht-api', 'API ✗');
+    }
+  }
+  function setDot(id, ok) {
+    const el = document.getElementById(id);
+    el.className = `health-dot ${ok ? 'ok' : 'bad'}`;
+  }
+  function setText(id, t) { document.getElementById(id).textContent = t; }
+
+  // ── Suggestions ──
+  async function fetchSuggestions(q) {
+    if (!q) { hideDrop(); return; }
+    lastPrefix = q;
+    showLoading();
+    try {
+      const r = await fetch(`${API}/suggest?q=${encodeURIComponent(q)}&mode=${mode}`);
+      const data = await r.json();
+      currentSuggestions = data;
+      selectedIdx = -1;
+      renderSuggestions(q, data);
+      if (q) fetchCacheDebug(q);
+    } catch {
+      renderError();
+    }
+  }
+
+  function renderSuggestions(q, items) {
+    const dd = document.getElementById('dropdown');
+    if (!items.length) {
+      dd.innerHTML = `<div class="dropdown-empty">No results for "<strong>${esc(q)}</strong>"</div>`;
+    } else {
+      dd.innerHTML = items.map((item, i) =>
+        `<div class="dropdown-item" id="di-${i}" onclick="selectItem('${esc(item)}')" onmouseenter="hoverItem(${i})">
+          <span class="item-icon">🔍</span>
+          <span class="item-text">${highlightPrefix(item, q)}</span>
+          <span class="item-rank">#${i + 1}</span>
+        </div>`
+      ).join('');
+    }
+    dd.classList.add('show');
+  }
+
+  function highlightPrefix(text, prefix) {
+    if (!prefix) return esc(text);
+    const idx = text.toLowerCase().indexOf(prefix.toLowerCase());
+    if (idx === -1) return esc(text);
+    return esc(text.slice(0, idx)) + `<mark>${esc(text.slice(idx, idx + prefix.length))}</mark>` + esc(text.slice(idx + prefix.length));
+  }
+
+  function showLoading() {
+    const dd = document.getElementById('dropdown');
+    dd.innerHTML = `<div class="dropdown-loading"><div class="spinner"></div>Searching…</div>`;
+    dd.classList.add('show');
+  }
+  function renderError() {
+    const dd = document.getElementById('dropdown');
+    dd.innerHTML = `<div class="dropdown-empty" style="color:var(--red)">⚠ Could not reach API</div>`;
+  }
+  function hideDrop() {
+    document.getElementById('dropdown').classList.remove('show');
+    currentSuggestions = [];
+    selectedIdx = -1;
+  }
+
+  function hoverItem(i) {
+    selectedIdx = i;
+    highlightSelected();
+  }
+  function highlightSelected() {
+    document.querySelectorAll('.dropdown-item').forEach((el, i) => {
+      el.classList.toggle('selected', i === selectedIdx);
+    });
+  }
+
+  async function selectItem(query) {
+    document.getElementById('search-input').value = query;
+    hideDrop();
+    await submitSearch(query);
+  }
+
+  async function submitSearch(query) {
+    try {
+      const r = await fetch(`${API}/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+      const d = await r.json();
+      showToast(`✓  ${d.message} — "${d.query}"`);
+      setTimeout(fetchTrending, 500);
+      setTimeout(fetchStats, 600);
+    } catch {
+      showToast('⚠ Search submission failed', true);
+    }
+  }
+
+  // ── Cache debug ──
+  async function fetchCacheDebug(prefix) {
+    try {
+      const r = await fetch(`${API}/cache/debug?prefix=${encodeURIComponent(prefix)}&mode=${mode}`);
+      const d = await r.json();
+      const status = d.cache_status;
+      const node = d.cache_node || '—';
+      document.getElementById('active-node').textContent = node;
+      document.getElementById('cache-debug').innerHTML = `
+        <div class="debug-row"><span class="debug-key">Prefix</span><span class="debug-val">"${esc(prefix)}"</span></div>
+        <div class="debug-row"><span class="debug-key">Cache Node</span><span class="debug-val" style="color:var(--accent)">${node}</span></div>
+        <div class="debug-row"><span class="debug-key">Redis Key</span><span class="debug-val" style="font-size:0.72rem">${esc(d.redis_key || '—')}</span></div>
+        <div class="debug-row"><span class="debug-key">Status</span><span class="debug-val ${status === 'HIT' ? 'hit' : 'miss'}">${status === 'HIT' ? '✓ HIT' : '◌ MISS'}</span></div>
+        <div class="debug-row"><span class="debug-key">Key Hash</span><span class="debug-val">${d.hash_ring_info?.key_hash ?? '—'}</span></div>
+        <div class="debug-row"><span class="debug-key">Virtual Nodes</span><span class="debug-val">${d.hash_ring_info?.virtual_nodes_per_node ?? '—'} per node</span></div>
+      `;
+    } catch {}
+  }
+
+  // ── Trending ──
+  async function fetchTrending() {
+    try {
+      const r = await fetch(`${API}/trending?top_k=10`);
+      const d = await r.json();
+      const list = d.trending || [];
+      const el = document.getElementById('trending-list');
+      if (!list.length) {
+        el.innerHTML = `<div class="trend-empty">No trending data yet. Submit some searches!</div>`;
+        return;
+      }
+      el.innerHTML = list.map((item, i) =>
+        `<div class="trend-item" onclick="clickTrend('${esc(item.query)}')">
+          <div class="trend-rank ${i < 3 ? 'top' : ''}">${i + 1}</div>
+          <span class="trend-text">${esc(item.query)}</span>
+          <span class="trend-score">${item.recency_score.toFixed(3)}</span>
+        </div>`
+      ).join('');
+    } catch {}
+  }
+
+  function clickTrend(q) {
+    document.getElementById('search-input').value = q;
+    fetchSuggestions(q);
+  }
+
+  // ── Stats ──
+  async function fetchStats() {
+    try {
+      const r = await fetch(`${API}/stats`);
+      const d = await r.json();
+      const bw = d.batch_writer || {};
+
+      // Batch stats
+      document.getElementById('batch-stats').innerHTML = `
+        <div class="stat-row"><span class="stat-label">Batch Threshold</span><span class="stat-val">${bw.batch_size_threshold} events</span></div>
+        <div class="stat-row"><span class="stat-label">Flush Interval</span><span class="stat-val">${bw.flush_interval_seconds}s</span></div>
+        <div class="stat-row"><span class="stat-label">Currently Buffered</span><span class="stat-val accent">${bw.currently_buffered}</span></div>
+        <div class="stat-row"><span class="stat-label">Total Received</span><span class="stat-val">${bw.total_search_events_received}</span></div>
+        <div class="stat-row"><span class="stat-label">Trie Writes Executed</span><span class="stat-val">${bw.total_trie_writes_executed}</span></div>
+        <div class="stat-row"><span class="stat-label">Writes Saved</span><span class="stat-val green">${bw.writes_saved_by_batching} (${bw.write_reduction_percent}%)</span></div>
+        <div class="stat-row"><span class="stat-label">Total Flushes</span><span class="stat-val">${bw.total_flush_operations}</span></div>
+        <div class="stat-row"><span class="stat-label">Total Words in Trie</span><span class="stat-val accent">${(d.trie?.total_words || 0).toLocaleString()}</span></div>
+      `;
+
+      // Ring viz
+      const ring = d.consistent_hash_ring || {};
+      const nodes = ring.nodes || [];
+      const dist = ring.distribution || {};
+      const activeNode = document.getElementById('active-node').textContent;
+      document.getElementById('ring-vis').innerHTML = nodes.map(n =>
+        `<div class="node-pill ${n === activeNode ? 'active' : ''}">
+          <div class="node-name">${n.replace('cache_node_', 'Node ')}</div>
+          <div class="node-vnodes">${dist[n] || 0} vnodes</div>
+        </div>`
+      ).join('');
+    } catch {}
+  }
+
+  // ── Toast ──
+  function showToast(msg, error = false) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.borderColor = error ? 'var(--red)' : 'var(--green)';
+    t.style.color = error ? 'var(--red)' : 'var(--green)';
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3000);
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // ── Input listeners ──
+  const input = document.getElementById('search-input');
+
+  input.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = input.value.trim();
+    if (!q) { hideDrop(); return; }
+    debounceTimer = setTimeout(() => fetchSuggestions(q), 150);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const items = document.querySelectorAll('.dropdown-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedIdx = Math.min(selectedIdx + 1, items.length - 1);
+      highlightSelected();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedIdx = Math.max(selectedIdx - 1, -1);
+      highlightSelected();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const q = selectedIdx >= 0 && currentSuggestions[selectedIdx]
+        ? currentSuggestions[selectedIdx]
+        : input.value.trim();
+      if (q) { input.value = q; hideDrop(); submitSearch(q); }
+    } else if (e.key === 'Escape') {
+      hideDrop();
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!document.querySelector('.search-wrap').contains(e.target)) hideDrop();
+  });
+
+  // ── Init ──
+  checkHealth();
+  fetchTrending();
+  fetchStats();
+  setInterval(fetchTrending, 5000);
+  setInterval(fetchStats, 8000);
+  setInterval(checkHealth, 15000);
+</script>
+</body>
+</html>
